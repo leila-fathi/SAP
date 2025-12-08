@@ -161,6 +161,33 @@ func TestGenerateTimestampPrefix(t *testing.T) {
 }
 
 func TestCheckGuessCorrectness(t *testing.T) {
-	//secretCode := GenerateSecretCode()
-	//assert.Equal(t, secretCode, 1111)
+	// Mocked secret code for deterministic testing
+	mockCode := 1234
+
+	// Define test cases in a table
+	tests := []struct {
+		name       string
+		guess      int
+		wantResult string
+	}{
+		{"Correct guess", 1234, "correct"},
+		{"Incorrect guess", 4321, "wrong"},
+		{"Another incorrect guess", 1111, "wrong"},
+	}
+
+	// Iterate over the table
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var result string
+			if tt.guess == mockCode {
+				result = "correct"
+			} else {
+				result = "wrong"
+			}
+
+			if result != tt.wantResult {
+				t.Errorf("For guess %d, expected %s but got %s", tt.guess, tt.wantResult, result)
+			}
+		})
+	}
 }

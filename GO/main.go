@@ -13,9 +13,12 @@ func main() {
 
 	mode := os.Args[1]
 
+	randGen := &game.RandomCodeGenerator{}
+	g := game.NewGame(randGen)
+
 	switch mode {
 	case "server":
-		game.StartServer() // Start the server, handling one player for now
+		g.StartServer() // Start the server, handling one player for now
 	case "client":
 		err := game.StartClient("localhost:8080") // Client connects to server
 		if err != nil {

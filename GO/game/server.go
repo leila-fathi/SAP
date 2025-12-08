@@ -6,7 +6,15 @@ import (
 	"net"
 )
 
-func StartServer() {
+type Game struct {
+	CodeGen CodeGenerator
+}
+
+func NewGame(gen CodeGenerator) *Game {
+	return &Game{CodeGen: gen}
+}
+
+func (g *Game) StartServer() {
 	listener, err := net.Listen("tcp", "0.0.0.0:8080")
 	if err != nil {
 		log.Fatalf("Error starting server: %v", err)
@@ -38,21 +46,24 @@ func StartServer() {
 		fmt.Printf("Received guess: %s\n", guess)
 
 		numGuess, err := ValidateGuess(guess)
+
 		if err != nil {
 			log.Printf("Error validating guess: %v", err)
 			writeToClient(conn, err.Error())
 		} else {
 			// Check if the guess matches the correct answer
 			var response, prefix string
-			if GenerateSecretCode() == numGuess {
+			prefix = GenerateTimestampPrefix() // always include timestamp
+			if g.CodeGen.GenerateSecretCode() == numGuess {
 				// prefix = GenerateTimestampPrefix()
-				response = "Congratulations! You guessed the correct number!"
+				response = prefix + "Congratulations! You guessed the correct number!"
 			} else {
-				response = "Try again!"
+				response = prefix + "Try again!"
 			}
 
 			// Send the response back to the client
 			writeToClient(conn, prefix+response)
+
 		}
 	}
 }

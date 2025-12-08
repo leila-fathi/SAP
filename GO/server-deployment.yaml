@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: code-breaker-server
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: code-breaker-server
+  template:
+    metadata:
+      labels:
+        app: code-breaker-server
+    spec:
+      containers:
+      - name: server
+        image: code-breaker-game
+        command: ["./game-app", "-mode=server"]
+        ports:
+        - containerPort: 8080

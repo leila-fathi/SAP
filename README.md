@@ -1,7 +1,6 @@
 # ccs_interview
 
-# Author
-Meghdad Mirabi
+# Author: Meghdad Mirabi
 
 # Guessing Game (Go TCP Server)
 
@@ -42,20 +41,12 @@ The project includes:
 | `--players` | Number of players required to start (default: 2) |
 | `--timeout` | Turn timeout in seconds (0 = no timeout)         |
 | `--addr`    | Bind address for the server                      |
-
+| `--mode`    | client / server / mserver                        |
 
 ## Start a Client
 
 ```go run main.go --mode=client --addr=localhost:8080```
 
-
-### Players type:
-
-- 1234 → guess
-
-- RESTART → vote to restart
-
-- QUIT → leave the game
 
 # Core Features
 - Turn-Based Multiplayer System
@@ -70,9 +61,9 @@ The project includes:
 
   - When a round ends:
 
-   - All players vote RESTART → new game begins
+     - All players vote RESTART → new game begins
 
-   - If any player votes QUIT → server shuts down gracefully
+     - If any player votes QUIT → server shuts down gracefully
 
 
 - Timestamp Prefix
@@ -86,12 +77,69 @@ The project includes:
 
   - The server records:
 
-  - Total games played
+    - Total games played
 
-  - Wins / losses
+    - Wins / losses
 
-  - Total guesses
+    - Total guesses
 
-  - Frequency of each guessed number
+    - Frequency of each guessed number
 
-  - Useful for debugging, dashboards, etc.
+    - Useful for debugging, dashboards, etc.
+
+  # Docker Image
+
+  ## Pre-requisites
+
+   Before running the game using image, ensure you have installed:
+
+  - Docker
+
+  - Docker Compose
+ (for multi-container setup)
+
+  - kubectl
+ & access to a Kubernetes cluster (for optional deployment)
+
+   ### Build Docker Image
+
+   ```docker build -t code-breaker-game .```
+
+   ### Run Docker Container
+     - Run server mode:
+
+   ```docker run -p 8080:8080 code-breaker-game```
+
+     - Run client mode:
+   ```docker run --rm -it code-breaker-game -mode=client -addr=host.docker.internal:8080```
+
+   ### Run Docker Compose:
+
+   ```docker-compose up --build```
+
+
+   - Stop and clean:
+
+   ```docker-compose down -v --remove-orphans```
+
+
+## Kubernetes Deployment
+
+### Apply
+
+```kubectl apply -f server-deployment.yaml```
+```kubectl apply -f server-service.yaml```
+
+Scale clients similarly if needed.
+
+# How to Play
+
+- Start the server container or pod.
+
+- Connect clients to the server using Docker or Kubernetes.
+
+- Clients enter a 4-digit secret code guess.
+
+- Server responds with success or prompts to try again.
+
+- Type exit in the client to quit.

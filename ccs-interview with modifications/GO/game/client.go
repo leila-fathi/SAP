@@ -5,63 +5,65 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"time"
 )
 
 func StartClient(address string) error {
-	// Connect to the server
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return fmt.Errorf("error connecting to server: %v", err)
 	}
 	defer conn.Close()
 
-	fmt.Println("Welcome to the Code Breaker Game! Enter a code between 1000 and 9999.")
+	fmt.Println("Connected to server. Waiting for game to start...")
 
-	// Create a reader to capture input from stdin
+	// Start a goroutine to continuously read server messages
+	done := make(chan struct{})
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				fmt.Println("\nDisconnected from server.")
+				close(done)
+				return
+			}
+			msg := string(buf[:n])
+			fmt.Print(msg)
+
+			if strings.Contains(msg, "Congratulations! You guessed the correct number!") {
+				fmt.Println("You won!")
+			}
+		}
+	}()
+
+	// Read user input and send to server
 	reader := bufio.NewReader(os.Stdin)
-
-	// Start the game loop
 	for {
-		// Prompt the user to enter their guess
-		fmt.Print("Enter your guess (secret code) or 'exit' to quit: ")
+		select {
+		case <-done:
+			return nil
+		default:
+		}
+
 		guess, err := reader.ReadString('\n')
 		if err != nil {
 			return fmt.Errorf("error reading input: %v", err)
 		}
-		guess = guess[:len(guess)-1] // Remove the trailing newline character
+		guess = strings.TrimSpace(guess)
 
-		// Allow the user to quit the game
-		if guess == "exit" {
+		if strings.EqualFold(guess, "exit") {
 			fmt.Println("Exiting the game.")
-			break
+			return nil
 		}
 
-		// Send the guess to the server
 		_, err = conn.Write([]byte(guess))
 		if err != nil {
 			return fmt.Errorf("error sending message to server: %v", err)
 		}
 
-		// Wait for a response from the server
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			return fmt.Errorf("error reading from server: %v", err)
-		}
-
-		// Print the server's response
-		serverResponse := string(buffer[:n])
-		fmt.Println("Server response:", serverResponse)
-
-		// If the guess was correct, end the game
-		if serverResponse == "Congratulations! You guessed the correct number!" {
-			fmt.Println("You won the game! Exiting...")
-			break
-		}
-
-		time.Sleep(1 * time.Second) // Simulate a delay before the next round
+		// Small delay to let the server response arrive before next prompt
+		time.Sleep(100 * time.Millisecond)
 	}
-
-	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 )
 
 type Game struct {
@@ -23,7 +24,6 @@ func (g *Game) StartServer() {
 
 	fmt.Println("Server started, waiting for a player...")
 
-	// Accept only one player connection for now.
 	conn, err := listener.Accept()
 	if err != nil {
 		log.Fatalf("Error accepting connection: %v", err)
@@ -32,7 +32,10 @@ func (g *Game) StartServer() {
 
 	fmt.Println("Player has connected.")
 
-	// Simple game logic to check the player's guess
+	// Generate the secret code ONCE per session
+	secret := g.CodeGen.GenerateSecretCode()
+	log.Printf("Secret code generated: %d", secret)
+
 	for {
 		buffer := make([]byte, 1024)
 		n, err := conn.Read(buffer)
@@ -41,29 +44,23 @@ func (g *Game) StartServer() {
 			return
 		}
 
-		// Process the guess sent by the client (assuming it's a number)
-		guess := string(buffer[:n])
+		guess := strings.TrimSpace(string(buffer[:n]))
 		fmt.Printf("Received guess: %s\n", guess)
 
 		numGuess, err := ValidateGuess(guess)
+		prefix := GenerateTimestampPrefix()
 
 		if err != nil {
 			log.Printf("Error validating guess: %v", err)
-			writeToClient(conn, err.Error())
+			writeToClient(conn, prefix+err.Error()+"\n")
+		} else if numGuess == secret {
+			writeToClient(conn, prefix+"Congratulations! You guessed the correct number!\n")
+			// Start a new round with a new secret
+			secret = g.CodeGen.GenerateSecretCode()
+			log.Printf("New secret code generated: %d", secret)
 		} else {
-			// Check if the guess matches the correct answer
-			var response, prefix string
-			prefix = GenerateTimestampPrefix() // always include timestamp
-			if g.CodeGen.GenerateSecretCode() == numGuess {
-				// prefix = GenerateTimestampPrefix()
-				response = prefix + "Congratulations! You guessed the correct number!"
-			} else {
-				response = prefix + "Try again!"
-			}
-
-			// Send the response back to the client
-			writeToClient(conn, prefix+response)
-
+			feedback := GenerateFeedback(secret, numGuess)
+			writeToClient(conn, prefix+feedback+"\n")
 		}
 	}
 }

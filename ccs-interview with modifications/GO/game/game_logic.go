@@ -48,21 +48,14 @@ func (r *RandomCodeGenerator) GenerateSecretCodeWithDifficulty(d Difficulty) int
 
 		switch d {
 		case Easy:
+			// Easy: all digits unique
 			if digits[0] != digits[1] && digits[0] != digits[2] && digits[0] != digits[3] &&
 				digits[1] != digits[2] && digits[1] != digits[3] &&
 				digits[2] != digits[3] {
 				return code
 			}
 		case Medium:
-			// existing logic: some transformation for variety
-			if sum%2 == 0 {
-				code = digits[3]*1000 + digits[2]*100 + digits[1]*10 + digits[0]
-			} else {
-				for i := 0; i < 4; i++ {
-					digits[i] = (digits[i] + 1) % 10
-				}
-				code = digits[0]*1000 + digits[1]*100 + digits[2]*10 + digits[3]
-			}
+			// Medium: just return any valid 4-digit code
 			return code
 		case Hard:
 			// Hard: at least one repeating digit and sum must be prime
@@ -88,7 +81,7 @@ func isPrime(n int) bool {
 	return true
 }
 
-// ValidateGuess ensures the input is exactly 4 digits
+// ValidateGuess ensures the input is exactly 4 digits in range 1000-9999
 func ValidateGuess(input string) (int, error) {
 	if len(input) != 4 {
 		return 0, fmt.Errorf("guess must be exactly 4 digits")
@@ -99,10 +92,18 @@ func ValidateGuess(input string) (int, error) {
 		}
 	}
 	guess, err := strconv.Atoi(input)
-	return guess, err
+	if err != nil {
+		return 0, err
+	}
+	if guess < 1000 || guess > 9999 {
+		return 0, fmt.Errorf("guess must be between 1000 and 9999")
+	}
+	return guess, nil
 }
 
-// GenerateFeedback gives hints about the guess vs the secret code
+// GenerateFeedback gives hints about the guess vs the secret code.
+// Uses the standard Mastermind algorithm: first count exact matches,
+// then count misplaced digits from the remaining unmatched pools.
 func GenerateFeedback(secret, guess int) string {
 	secretDigits := [4]int{}
 	guessDigits := [4]int{}
@@ -115,19 +116,36 @@ func GenerateFeedback(secret, guess int) string {
 		tempGuess /= 10
 	}
 
+	// Pass 1: count exact matches
 	correct := 0
-	misplaced := 0
-	hints := []string{}
-
+	secretRemain := [4]int{}
+	guessRemain := [4]int{}
+	remainCount := 0
 	for i := 0; i < 4; i++ {
 		if secretDigits[i] == guessDigits[i] {
 			correct++
-		} else if contains(secretDigits[:], guessDigits[i]) {
-			misplaced++
+		} else {
+			secretRemain[remainCount] = secretDigits[i]
+			guessRemain[remainCount] = guessDigits[i]
+			remainCount++
 		}
 	}
 
-	// Bonus hint: location-based
+	// Pass 2: count misplaced from unmatched digits
+	misplaced := 0
+	secretPool := make(map[int]int)
+	for i := 0; i < remainCount; i++ {
+		secretPool[secretRemain[i]]++
+	}
+	for i := 0; i < remainCount; i++ {
+		if secretPool[guessRemain[i]] > 0 {
+			misplaced++
+			secretPool[guessRemain[i]]--
+		}
+	}
+
+	// Location hints for exact matches
+	hints := []string{}
 	for i := 0; i < 4; i++ {
 		if secretDigits[i] == guessDigits[i] {
 			if i < 2 {
@@ -141,20 +159,10 @@ func GenerateFeedback(secret, guess int) string {
 	return fmt.Sprintf("Correct: %d, Misplaced: %d, Hints: %v", correct, misplaced, hints)
 }
 
-// contains checks if an int is in a slice
-func contains(arr []int, n int) bool {
-	for _, v := range arr {
-		if v == n {
-			return true
-		}
-	}
-	return false
-}
-
 // GenerateTimestampPrefix generates a textual prefix containing the current time
 func GenerateTimestampPrefix() string {
 	currentTime := time.Now()
 	timestamp := currentTime.Unix()
-	prefix := fmt.Sprintf("TIME: %d -", timestamp)
+	prefix := fmt.Sprintf("TIME: %d - ", timestamp)
 	return prefix
 }

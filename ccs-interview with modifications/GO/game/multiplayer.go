@@ -104,84 +104,44 @@ func (mg *MultiplayerGame) Start(address string) error {
 		}
 		mg.addPlayer(player)
 		log.Printf("Player %d connected from %s", player.ID, conn.RemoteAddr().String())
+		connectedPlayers := mg.playerCount()
+		remainingPlayers := mg.MaxPlayers - connectedPlayers
+		mg.broadcastExcept(mg.snapshotPlayers(), player, fmt.Sprintf("%sPlayer %d joined the game. %d/%d connected, waiting for %d more.\n", GenerateTimestampPrefix(), player.ID, connectedPlayers, mg.MaxPlayers, remainingPlayers))
 		mg.writeToPlayer(player, fmt.Sprintf("%sWelcome Player %d! Waiting for other players...\n", GenerateTimestampPrefix(), player.ID))
 	}
 
 	mg.broadcast(fmt.Sprintf("%sGame started with %d players! Player 1 begins.\n", GenerateTimestampPrefix(), mg.MaxPlayers))
 
-	// Main loop allows multiple rounds with restart voting
+	// Main loop allows multiple rounds while enough players remain connected.
 	for {
+		if mg.playerCount() == 0 {
+			log.Printf("No players remain. Shutting down multiplayer server.")
+			return nil
+		}
+
 		secret := mg.CodeGen.GenerateSecretCode()
 		log.Printf("Generated secret for session: %d", secret)
 
 		winner := mg.runGameSession(secret)
+
+		if mg.playerCount() < mg.minimumPlayers() {
+			mg.broadcast(fmt.Sprintf("%sNot enough players remain to continue. Ending session.\n", GenerateTimestampPrefix()))
+			mg.closeAllPlayers()
+			log.Printf("Not enough players remain. Shutting down multiplayer server.")
+			return nil
+		}
+
 		mg.Analytics.RecordGame(winner != nil)
 
 		if winner != nil {
-			mg.broadcast(fmt.Sprintf("%sPlayer %d broke the code %d! Game Over.\n", GenerateTimestampPrefix(), winner.ID, secret))
+			mg.broadcast(fmt.Sprintf("%sPlayer %d broke the code %d! Round over.\n", GenerateTimestampPrefix(), winner.ID, secret))
 		} else {
 			mg.broadcast(fmt.Sprintf("%sGame ended without a winner. The code was %d.\n", GenerateTimestampPrefix(), secret))
 		}
 
 		log.Printf("Analytics: %s", mg.Analytics.Summary())
-
-		// Restart voting
-		if !mg.restartVoting() {
-			return nil
-		}
-		// All players voted RESTART — loop continues with new secret
+		mg.broadcast(fmt.Sprintf("%sStarting a new round...\n", GenerateTimestampPrefix()))
 	}
-}
-
-// restartVoting asks all players whether to restart. Returns true if all vote RESTART.
-func (mg *MultiplayerGame) restartVoting() bool {
-	mg.broadcast(fmt.Sprintf("%sType RESTART to play again or QUIT to disconnect.\n", GenerateTimestampPrefix()))
-
-	mg.mu.Lock()
-	snapshot := make([]*Player, len(mg.players))
-	copy(snapshot, mg.players)
-	mg.mu.Unlock()
-
-	restarts := make([]bool, len(snapshot))
-	for i, p := range snapshot {
-		_ = p.Conn.SetReadDeadline(time.Now().Add(120 * time.Second))
-		buf := make([]byte, 256)
-		n, err := p.Conn.Read(buf)
-		if err != nil {
-			log.Printf("Player %d failed to send restart vote: %v", p.ID, err)
-			restarts[i] = false
-			continue
-		}
-		cmd := strings.TrimSpace(string(buf[:n]))
-		if strings.EqualFold(cmd, "RESTART") {
-			restarts[i] = true
-		} else {
-			restarts[i] = false
-			mg.writeToPlayer(p, GenerateTimestampPrefix()+"Goodbye!\n")
-			_ = p.Conn.Close()
-		}
-	}
-
-	allRestart := true
-	for _, r := range restarts {
-		if !r {
-			allRestart = false
-			break
-		}
-	}
-
-	if !allRestart {
-		mg.broadcast(GenerateTimestampPrefix() + "One or more players declined to restart. Shutting down session.\n")
-		mg.mu.Lock()
-		for _, p := range mg.players {
-			_ = p.Conn.Close()
-		}
-		mg.mu.Unlock()
-		return false
-	}
-
-	mg.broadcast(fmt.Sprintf("%sAll players voted RESTART! New round starting...\n", GenerateTimestampPrefix()))
-	return true
 }
 
 // runGameSession runs a single game round with turn rotation.
@@ -195,7 +155,8 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 	current := 0
 
 	for {
-		if len(activePlayers) == 0 {
+		activePlayers = mg.filterActivePlayers(activePlayers)
+		if len(activePlayers) < mg.minimumPlayers() {
 			return nil
 		}
 
@@ -223,7 +184,7 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 			_ = p.Conn.Close()
 			activePlayers = removePlayer(activePlayers, p)
 			mg.removePlayerFromRoster(p)
-			if len(activePlayers) == 0 {
+			if len(activePlayers) < mg.minimumPlayers() {
 				return nil
 			}
 			current = current % len(activePlayers)
@@ -242,7 +203,7 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 			_ = p.Conn.Close()
 			activePlayers = removePlayer(activePlayers, p)
 			mg.removePlayerFromRoster(p)
-			if len(activePlayers) == 0 {
+			if len(activePlayers) < mg.minimumPlayers() {
 				return nil
 			}
 			current = current % len(activePlayers)
@@ -287,10 +248,76 @@ func (mg *MultiplayerGame) playerCount() int {
 	return len(mg.players)
 }
 
+func (mg *MultiplayerGame) snapshotPlayers() []*Player {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+	snapshot := make([]*Player, len(mg.players))
+	copy(snapshot, mg.players)
+	return snapshot
+}
+
+func (mg *MultiplayerGame) minimumPlayers() int {
+	if mg.MaxPlayers <= 1 {
+		return 1
+	}
+	return 2
+}
+
+func (mg *MultiplayerGame) closeAllPlayers() {
+	for _, p := range mg.snapshotPlayers() {
+		_ = p.Conn.Close()
+	}
+}
+
 func (mg *MultiplayerGame) removePlayerFromRoster(p *Player) {
 	mg.mu.Lock()
 	defer mg.mu.Unlock()
 	mg.players = removePlayer(mg.players, p)
+}
+
+func (mg *MultiplayerGame) isPlayerActive(p *Player) bool {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
+	for _, pl := range mg.players {
+		if pl == p {
+			return true
+		}
+	}
+	return false
+}
+
+func (mg *MultiplayerGame) filterActivePlayers(players []*Player) []*Player {
+	filtered := make([]*Player, 0, len(players))
+	for _, p := range players {
+		if mg.isPlayerActive(p) {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
+}
+
+func (mg *MultiplayerGame) disconnectPlayer(p *Player, reason string) bool {
+	mg.mu.Lock()
+	found := false
+	for _, pl := range mg.players {
+		if pl == p {
+			found = true
+			break
+		}
+	}
+	if found {
+		mg.players = removePlayer(mg.players, p)
+	}
+	mg.mu.Unlock()
+
+	if !found {
+		return false
+	}
+
+	_ = p.Conn.Close()
+	log.Printf("Player %d disconnected: %s", p.ID, reason)
+	mg.broadcast(fmt.Sprintf("%sPlayer %d disconnected: %s\n", GenerateTimestampPrefix(), p.ID, reason))
+	return true
 }
 
 // removePlayer returns a new slice without the given player.
@@ -310,6 +337,7 @@ func (mg *MultiplayerGame) writeToPlayer(p *Player, s string) {
 	_, err := p.Conn.Write([]byte(s))
 	if err != nil {
 		log.Printf("Error writing to player %d: %v", p.ID, err)
+		mg.disconnectPlayer(p, "connection lost")
 	}
 }
 
@@ -321,14 +349,22 @@ func (mg *MultiplayerGame) broadcast(s string) {
 	mg.mu.Unlock()
 
 	for _, p := range snapshot {
-		_, _ = p.Conn.Write([]byte(s))
+		_, err := p.Conn.Write([]byte(s))
+		if err != nil {
+			log.Printf("Error writing to player %d: %v", p.ID, err)
+			mg.disconnectPlayer(p, "connection lost")
+		}
 	}
 }
 
 // broadcastAll sends to a specific list of active players.
 func (mg *MultiplayerGame) broadcastAll(players []*Player, s string) {
 	for _, p := range players {
-		_, _ = p.Conn.Write([]byte(s))
+		_, err := p.Conn.Write([]byte(s))
+		if err != nil {
+			log.Printf("Error writing to player %d: %v", p.ID, err)
+			mg.disconnectPlayer(p, "connection lost")
+		}
 	}
 }
 
@@ -338,6 +374,10 @@ func (mg *MultiplayerGame) broadcastExcept(players []*Player, except *Player, s 
 		if p == except {
 			continue
 		}
-		_, _ = p.Conn.Write([]byte(s))
+		_, err := p.Conn.Write([]byte(s))
+		if err != nil {
+			log.Printf("Error writing to player %d: %v", p.ID, err)
+			mg.disconnectPlayer(p, "connection lost")
+		}
 	}
 }

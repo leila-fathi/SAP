@@ -32,20 +32,20 @@ The project includes:
 # Running the Game
 ## Start the Server
 
-``` go run main.go --mode=server --players=2 --timeout=15 --addr=0.0.0.0:8080 ```
+``` go run main.go -mode=mserver -players=2 -timeout=15 -addr=0.0.0.0:8080 ```
 
 ### Flags
 
 | Flag        | Description                                      |
 | ----------- | ------------------------------------------------ |
-| `--players` | Number of players required to start (default: 2) |
-| `--timeout` | Turn timeout in seconds (0 = no timeout)         |
-| `--addr`    | Bind address for the server                      |
-| `--mode`    | client / server / mserver                        |
+| `-players` | Number of players required to start (default: 2) |
+| `-timeout` | Turn timeout in seconds (0 = no timeout)         |
+| `-addr`    | Bind address for the server                      |
+| `-mode`    | client / server / mserver                        |
 
 ## Start a Client
 
-```go run main.go --mode=client --addr=localhost:8080```
+```go run main.go -mode=client -addr=localhost:8080```
 
 
 # Core Features

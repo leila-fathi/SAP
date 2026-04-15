@@ -13,7 +13,7 @@ import (
 type MultiplayerGame struct {
 	CodeGen    CodeGenerator
 	MaxPlayers int
-	Timeout    time.Duration // per-turn timeout
+	Timeout    time.Duration
 	Analytics  *Analytics
 
 	listener net.Listener
@@ -22,10 +22,18 @@ type MultiplayerGame struct {
 	players []*Player
 }
 
+// PlayerMessage carries input from a player's reader goroutine.
+type PlayerMessage struct {
+	Player *Player
+	Text   string
+	Err    error
+}
+
 // Player holds connection + id info.
 type Player struct {
 	ID   int
 	Conn net.Conn
+	In   chan PlayerMessage // receives all input from this player
 }
 
 // Analytics contains lightweight server-side stats.
@@ -80,7 +88,26 @@ func NewMultiplayerGame(codeGen CodeGenerator, maxPlayers int, timeout time.Dura
 	}
 }
 
-// Start listens for player connections and runs the game loop.
+// startPlayerReader launches a goroutine that reads from the player's connection
+// and sends every message to the player's In channel.
+func startPlayerReader(p *Player) {
+	go func() {
+		buf := make([]byte, 1024)
+		for {
+			n, err := p.Conn.Read(buf)
+			if err != nil {
+				p.In <- PlayerMessage{Player: p, Err: err}
+				return
+			}
+			text := strings.TrimSpace(string(buf[:n]))
+			if text != "" {
+				p.In <- PlayerMessage{Player: p, Text: text}
+			}
+		}
+	}()
+}
+
+// Start listens for player connections and starts the multiplayer loop.
 func (mg *MultiplayerGame) Start(address string) error {
 	ln, err := net.Listen("tcp", address)
 	if err != nil {
@@ -91,30 +118,59 @@ func (mg *MultiplayerGame) Start(address string) error {
 
 	log.Printf("Multiplayer server listening on %s — waiting for %d players...", address, mg.MaxPlayers)
 
-	// Accept connections until we have MaxPlayers
-	for mg.playerCount() < mg.MaxPlayers {
-		conn, err := ln.Accept()
-		if err != nil {
-			log.Printf("accept error: %v", err)
-			continue
+	// Accept connections using a channel so we can also monitor existing players
+	newConns := make(chan net.Conn)
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			newConns <- conn
 		}
-		player := &Player{
-			ID:   mg.playerCount() + 1,
-			Conn: conn,
+	}()
+
+	for len(mg.getActivePlayers()) < mg.MaxPlayers {
+		select {
+		case conn := <-newConns:
+			player := &Player{
+				ID:   len(mg.players) + 1,
+				Conn: conn,
+				In:   make(chan PlayerMessage, 10),
+			}
+			mg.players = append(mg.players, player)
+			startPlayerReader(player)
+			log.Printf("Player %d connected from %s", player.ID, conn.RemoteAddr().String())
+			mg.writeToPlayer(player, fmt.Sprintf("%sWelcome Player %d! Waiting for other players...\nType QUIT at any time to leave the game.\n", GenerateTimestampPrefix(), player.ID))
+
+		default:
+			// Check if any waiting player sent QUIT or disconnected
+			for _, p := range mg.players {
+				select {
+				case msg := <-p.In:
+					if msg.Err != nil || strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
+						log.Printf("Player %d left during lobby.", p.ID)
+						mg.writeToPlayer(p, GenerateTimestampPrefix()+"Goodbye!\n")
+						p.Conn.Close()
+						p.Conn = nil
+						// Notify remaining players in the lobby
+						for _, other := range mg.getActivePlayers() {
+							mg.writeToPlayer(other, fmt.Sprintf("%sPlayer %d has left. Waiting for more players...\n", GenerateTimestampPrefix(), p.ID))
+						}
+					}
+				default:
+				}
+			}
+			time.Sleep(100 * time.Millisecond)
 		}
-		mg.addPlayer(player)
-		log.Printf("Player %d connected from %s", player.ID, conn.RemoteAddr().String())
-		connectedPlayers := mg.playerCount()
-		remainingPlayers := mg.MaxPlayers - connectedPlayers
-		mg.broadcastExcept(mg.snapshotPlayers(), player, fmt.Sprintf("%sPlayer %d joined the game. %d/%d connected, waiting for %d more.\n", GenerateTimestampPrefix(), player.ID, connectedPlayers, mg.MaxPlayers, remainingPlayers))
-		mg.writeToPlayer(player, fmt.Sprintf("%sWelcome Player %d! Waiting for other players...\n", GenerateTimestampPrefix(), player.ID))
 	}
 
-	mg.broadcast(fmt.Sprintf("%sGame started with %d players! Player 1 begins.\n", GenerateTimestampPrefix(), mg.MaxPlayers))
+	activePlayers := mg.getActivePlayers()
+	mg.broadcastAll(activePlayers, fmt.Sprintf("%sGame started with %d players! Player 1 begins.\n", GenerateTimestampPrefix(), len(activePlayers)))
 
 	// Main loop allows multiple rounds while enough players remain connected.
 	for {
-		if mg.playerCount() == 0 {
+		if len(mg.getActivePlayers()) == 0 {
 			log.Printf("No players remain. Shutting down multiplayer server.")
 			return nil
 		}
@@ -123,95 +179,153 @@ func (mg *MultiplayerGame) Start(address string) error {
 		log.Printf("Generated secret for session: %d", secret)
 
 		winner := mg.runGameSession(secret)
+		mg.Analytics.RecordGame(winner != nil)
 
-		if mg.playerCount() < mg.minimumPlayers() {
-			mg.broadcast(fmt.Sprintf("%sNot enough players remain to continue. Ending session.\n", GenerateTimestampPrefix()))
-			mg.closeAllPlayers()
-			log.Printf("Not enough players remain. Shutting down multiplayer server.")
+		// Check if any players remain
+		activePlayers := mg.getActivePlayers()
+		if len(activePlayers) == 0 {
+			log.Println("All players disconnected.")
+			mg.LogAnalytics()
 			return nil
 		}
 
-		mg.Analytics.RecordGame(winner != nil)
-
 		if winner != nil {
-			mg.broadcast(fmt.Sprintf("%sPlayer %d broke the code %d! Round over.\n", GenerateTimestampPrefix(), winner.ID, secret))
+			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d broke the code %d! Game Over.\n", GenerateTimestampPrefix(), winner.ID, secret))
 		} else {
-			mg.broadcast(fmt.Sprintf("%sGame ended without a winner. The code was %d.\n", GenerateTimestampPrefix(), secret))
+			mg.broadcastAll(activePlayers, fmt.Sprintf("%sGame ended without a winner.\n", GenerateTimestampPrefix()))
 		}
 
-		log.Printf("Analytics: %s", mg.Analytics.Summary())
-		mg.broadcast(fmt.Sprintf("%sStarting a new round...\n", GenerateTimestampPrefix()))
+		mg.broadcastAll(activePlayers, fmt.Sprintf("%sType RESTART to play again or QUIT to leave.\n", GenerateTimestampPrefix()))
+
+		// Collect restart votes from remaining players
+		restartVotes := map[int]bool{}
+		remaining := len(activePlayers)
+		timeout := time.After(120 * time.Second)
+
+	voteLoop:
+		for len(restartVotes) < remaining {
+			select {
+			case <-timeout:
+				break voteLoop
+			default:
+			}
+
+			// Read from any active player
+			msg := mg.readFromAny(activePlayers, 2*time.Second)
+			if msg == nil {
+				continue
+			}
+			if msg.Err != nil {
+				restartVotes[msg.Player.ID] = false
+				continue
+			}
+			if strings.EqualFold(msg.Text, "RESTART") {
+				restartVotes[msg.Player.ID] = true
+				mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"Vote received: RESTART\n")
+			} else if strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
+				restartVotes[msg.Player.ID] = false
+				mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"Goodbye!\n")
+				msg.Player.Conn.Close()
+			} else {
+				restartVotes[msg.Player.ID] = false
+			}
+		}
+
+		allRestart := len(restartVotes) == remaining
+		for _, v := range restartVotes {
+			if !v {
+				allRestart = false
+				break
+			}
+		}
+
+		if !allRestart {
+			activePlayers = mg.getActivePlayers()
+			mg.broadcastAll(activePlayers, GenerateTimestampPrefix()+"Not all players voted to restart. Shutting down session.\n")
+			mg.LogAnalytics()
+			for _, p := range activePlayers {
+				_ = p.Conn.Close()
+			}
+			return nil
+		}
 	}
 }
 
-// runGameSession runs a single game round with turn rotation.
-// Returns the winning Player or nil.
+// runGameSession runs a single game round until someone wins or all leave.
 func (mg *MultiplayerGame) runGameSession(secret int) *Player {
-	mg.mu.Lock()
-	activePlayers := make([]*Player, len(mg.players))
-	copy(activePlayers, mg.players)
-	mg.mu.Unlock()
-
 	current := 0
+	activePlayers := mg.getActivePlayers()
 
 	for {
-		activePlayers = mg.filterActivePlayers(activePlayers)
-		if len(activePlayers) < mg.minimumPlayers() {
+		if len(activePlayers) == 0 {
 			return nil
 		}
 
 		p := activePlayers[current%len(activePlayers)]
-		mg.writeToPlayer(p, fmt.Sprintf("%sYour turn Player %d. Enter a 4-digit guess:\n", GenerateTimestampPrefix(), p.ID))
-		mg.broadcastExcept(activePlayers, p, fmt.Sprintf("%sPlayer %d is guessing...\n", GenerateTimestampPrefix(), p.ID))
+		mg.writeToPlayer(p, fmt.Sprintf("%sYour turn Player %d. Enter a 4-digit guess (or QUIT to leave):\n", GenerateTimestampPrefix(), p.ID))
+		mg.broadcastToList(activePlayers, p, fmt.Sprintf("%sPlayer %d is guessing...\n", GenerateTimestampPrefix(), p.ID))
 
-		// Set turn deadline
+		// Wait for input from ANY player (so anyone can quit anytime)
+		var deadline time.Duration
 		if mg.Timeout > 0 {
-			_ = p.Conn.SetReadDeadline(time.Now().Add(mg.Timeout))
+			deadline = mg.Timeout
 		} else {
-			_ = p.Conn.SetReadDeadline(time.Time{})
+			deadline = 0 // no timeout
 		}
 
-		buf := make([]byte, 1024)
-		n, err := p.Conn.Read(buf)
-		if err != nil {
-			if ne, ok := err.(net.Error); ok && ne.Timeout() {
-				mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d missed their turn (timeout).\n", GenerateTimestampPrefix(), p.ID))
-				current = (current + 1) % len(activePlayers)
-				continue
-			}
-			// Disconnect — remove player
-			log.Printf("Error reading from player %d: %v. Removing player.", p.ID, err)
-			_ = p.Conn.Close()
-			activePlayers = removePlayer(activePlayers, p)
-			mg.removePlayerFromRoster(p)
-			if len(activePlayers) < mg.minimumPlayers() {
+		msg := mg.readFromAnyWithTurnTimeout(activePlayers, p, deadline)
+
+		if msg == nil {
+			// Turn timeout for active player
+			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d missed their turn (timeout).\n", GenerateTimestampPrefix(), p.ID))
+			current = (current + 1) % len(activePlayers)
+			continue
+		}
+
+		if msg.Err != nil {
+			log.Printf("Player %d disconnected: %v", msg.Player.ID, msg.Err)
+			_ = msg.Player.Conn.Close()
+			activePlayers = removePlayers(activePlayers, msg.Player)
+			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d has disconnected.\n", GenerateTimestampPrefix(), msg.Player.ID))
+			if len(activePlayers) < 2 {
+				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue. Game over.\n", GenerateTimestampPrefix()))
+				log.Printf("Not enough players remaining. Ending game session.")
 				return nil
 			}
 			current = current % len(activePlayers)
 			continue
 		}
 
-		input := strings.TrimSpace(string(buf[:n]))
+		// Handle QUIT/EXIT from any player at any time
+		if strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
+			log.Printf("Player %d quit the game.", msg.Player.ID)
+			mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"Goodbye!\n")
+			_ = msg.Player.Conn.Close()
+			activePlayers = removePlayers(activePlayers, msg.Player)
+			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d has left the game.\n", GenerateTimestampPrefix(), msg.Player.ID))
+			if len(activePlayers) < 2 {
+				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue. Game over.\n", GenerateTimestampPrefix()))
+				log.Printf("Not enough players remaining. Ending game session.")
+				return nil
+			}
+			current = current % len(activePlayers)
+			continue
+		}
 
-		// Mid-game commands
-		if strings.EqualFold(input, "RESTART") {
+		// If the message is from someone other than the current player, ignore the guess
+		if msg.Player != p {
+			mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"It's not your turn. Please wait.\n")
+			continue
+		}
+
+		// Handle RESTART from current player
+		if strings.EqualFold(msg.Text, "RESTART") {
 			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d requested restart. Ending this round.\n", GenerateTimestampPrefix(), p.ID))
 			return nil
 		}
-		if strings.EqualFold(input, "QUIT") {
-			mg.writeToPlayer(p, GenerateTimestampPrefix()+"Goodbye!\n")
-			_ = p.Conn.Close()
-			activePlayers = removePlayer(activePlayers, p)
-			mg.removePlayerFromRoster(p)
-			if len(activePlayers) < mg.minimumPlayers() {
-				return nil
-			}
-			current = current % len(activePlayers)
-			continue
-		}
 
 		// Validate guess
-		guessNum, err := ValidateGuess(input)
+		guessNum, err := ValidateGuess(msg.Text)
 		if err != nil {
 			mg.writeToPlayer(p, GenerateTimestampPrefix()+err.Error()+"\n")
 			current = (current + 1) % len(activePlayers)
@@ -220,120 +334,106 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 
 		mg.Analytics.RecordGuess(guessNum)
 
-		// Check guess
 		if guessNum == secret {
 			mg.writeToPlayer(p, GenerateTimestampPrefix()+"Congratulations! You guessed the correct number!\n")
-			mg.broadcastExcept(activePlayers, p, fmt.Sprintf("%sPlayer %d guessed the correct number!\n", GenerateTimestampPrefix(), p.ID))
+			mg.broadcastToList(activePlayers, p, fmt.Sprintf("%sPlayer %d guessed the correct number %d!\n", GenerateTimestampPrefix(), p.ID, secret))
 			return p
 		}
 
-		// Wrong guess — send feedback with hints
 		feedback := GenerateFeedback(secret, guessNum)
-		mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d guessed %d -> %s\n", GenerateTimestampPrefix(), p.ID, guessNum, feedback))
+		mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d guessed %d — %s\n", GenerateTimestampPrefix(), p.ID, guessNum, feedback))
 		current = (current + 1) % len(activePlayers)
 	}
 }
 
-// --- Thread-safe player management ---
-
-func (mg *MultiplayerGame) addPlayer(p *Player) {
-	mg.mu.Lock()
-	defer mg.mu.Unlock()
-	mg.players = append(mg.players, p)
-}
-
-func (mg *MultiplayerGame) playerCount() int {
-	mg.mu.Lock()
-	defer mg.mu.Unlock()
-	return len(mg.players)
-}
-
-func (mg *MultiplayerGame) snapshotPlayers() []*Player {
-	mg.mu.Lock()
-	defer mg.mu.Unlock()
-	snapshot := make([]*Player, len(mg.players))
-	copy(snapshot, mg.players)
-	return snapshot
-}
-
-func (mg *MultiplayerGame) minimumPlayers() int {
-	if mg.MaxPlayers <= 1 {
-		return 1
+// readFromAnyWithTurnTimeout reads from any player's channel.
+// Returns nil if the turn player times out. QUIT from any player is returned immediately.
+func (mg *MultiplayerGame) readFromAnyWithTurnTimeout(players []*Player, turnPlayer *Player, timeout time.Duration) *PlayerMessage {
+	// Build a dynamic select over all player channels
+	var timer <-chan time.Time
+	if timeout > 0 {
+		timer = time.After(timeout)
 	}
-	return 2
-}
 
-func (mg *MultiplayerGame) closeAllPlayers() {
-	for _, p := range mg.snapshotPlayers() {
-		_ = p.Conn.Close()
-	}
-}
-
-func (mg *MultiplayerGame) removePlayerFromRoster(p *Player) {
-	mg.mu.Lock()
-	defer mg.mu.Unlock()
-	mg.players = removePlayer(mg.players, p)
-}
-
-func (mg *MultiplayerGame) isPlayerActive(p *Player) bool {
-	mg.mu.Lock()
-	defer mg.mu.Unlock()
-	for _, pl := range mg.players {
-		if pl == p {
-			return true
+	for {
+		// Check all player channels with a short poll
+		for _, p := range players {
+			select {
+			case msg := <-p.In:
+				return &msg
+			default:
+			}
 		}
-	}
-	return false
-}
 
-func (mg *MultiplayerGame) filterActivePlayers(players []*Player) []*Player {
-	filtered := make([]*Player, 0, len(players))
-	for _, p := range players {
-		if mg.isPlayerActive(p) {
-			filtered = append(filtered, p)
+		// Check timeout
+		if timer != nil {
+			select {
+			case <-timer:
+				return nil
+			default:
+			}
 		}
+
+		time.Sleep(50 * time.Millisecond)
 	}
-	return filtered
 }
 
-func (mg *MultiplayerGame) disconnectPlayer(p *Player, reason string) bool {
-	mg.mu.Lock()
-	found := false
-	for _, pl := range mg.players {
-		if pl == p {
-			found = true
-			break
+// readFromAny reads the next message from any player within a timeout.
+func (mg *MultiplayerGame) readFromAny(players []*Player, timeout time.Duration) *PlayerMessage {
+	deadline := time.After(timeout)
+	for {
+		for _, p := range players {
+			select {
+			case msg := <-p.In:
+				return &msg
+			default:
+			}
 		}
+		select {
+		case <-deadline:
+			return nil
+		default:
+		}
+		time.Sleep(50 * time.Millisecond)
 	}
-	if found {
-		mg.players = removePlayer(mg.players, p)
-	}
-	mg.mu.Unlock()
-
-	if !found {
-		return false
-	}
-
-	_ = p.Conn.Close()
-	log.Printf("Player %d disconnected: %s", p.ID, reason)
-	mg.broadcast(fmt.Sprintf("%sPlayer %d disconnected: %s\n", GenerateTimestampPrefix(), p.ID, reason))
-	return true
 }
 
-// removePlayer returns a new slice without the given player.
-func removePlayer(players []*Player, p *Player) []*Player {
-	result := make([]*Player, 0, len(players))
-	for _, pl := range players {
-		if pl != p {
-			result = append(result, pl)
+// getActivePlayers returns players whose connections are still open.
+func (mg *MultiplayerGame) getActivePlayers() []*Player {
+	result := []*Player{}
+	for _, p := range mg.players {
+		if p != nil && p.Conn != nil {
+			result = append(result, p)
 		}
 	}
 	return result
 }
 
-// --- Messaging helpers ---
+// removePlayers returns a new slice without the given player.
+func removePlayers(players []*Player, remove *Player) []*Player {
+	result := []*Player{}
+	for _, p := range players {
+		if p != remove {
+			result = append(result, p)
+		}
+	}
+	return result
+}
 
+// disconnectPlayer closes a player's connection and marks them inactive.
+func (mg *MultiplayerGame) disconnectPlayer(p *Player, reason string) {
+	if p.Conn != nil {
+		_ = p.Conn.Close()
+		p.Conn = nil
+	}
+	log.Printf("Player %d disconnected: %s", p.ID, reason)
+}
+
+// writeToPlayer writes a message to a single player.
 func (mg *MultiplayerGame) writeToPlayer(p *Player, s string) {
+	if p.Conn == nil {
+		return
+	}
 	_, err := p.Conn.Write([]byte(s))
 	if err != nil {
 		log.Printf("Error writing to player %d: %v", p.ID, err)
@@ -341,43 +441,28 @@ func (mg *MultiplayerGame) writeToPlayer(p *Player, s string) {
 	}
 }
 
-// broadcast sends to all players in mg.players (thread-safe).
-func (mg *MultiplayerGame) broadcast(s string) {
-	mg.mu.Lock()
-	snapshot := make([]*Player, len(mg.players))
-	copy(snapshot, mg.players)
-	mg.mu.Unlock()
-
-	for _, p := range snapshot {
-		_, err := p.Conn.Write([]byte(s))
-		if err != nil {
-			log.Printf("Error writing to player %d: %v", p.ID, err)
-			mg.disconnectPlayer(p, "connection lost")
-		}
-	}
-}
-
-// broadcastAll sends to a specific list of active players.
+// broadcastAll sends to all players in the given list.
 func (mg *MultiplayerGame) broadcastAll(players []*Player, s string) {
 	for _, p := range players {
-		_, err := p.Conn.Write([]byte(s))
-		if err != nil {
-			log.Printf("Error writing to player %d: %v", p.ID, err)
-			mg.disconnectPlayer(p, "connection lost")
+		if p != nil {
+			_, _ = p.Conn.Write([]byte(s))
 		}
 	}
 }
 
-// broadcastExcept sends to all active players except one.
-func (mg *MultiplayerGame) broadcastExcept(players []*Player, except *Player, s string) {
+// broadcastToList sends to all players in the list except one.
+func (mg *MultiplayerGame) broadcastToList(players []*Player, except *Player, s string) {
 	for _, p := range players {
-		if p == except {
-			continue
-		}
-		_, err := p.Conn.Write([]byte(s))
-		if err != nil {
-			log.Printf("Error writing to player %d: %v", p.ID, err)
-			mg.disconnectPlayer(p, "connection lost")
+		if p != nil && p != except {
+			_, _ = p.Conn.Write([]byte(s))
 		}
 	}
+}
+
+// LogAnalytics prints the current analytics to the server log.
+func (mg *MultiplayerGame) LogAnalytics() {
+	mg.Analytics.mu.Lock()
+	defer mg.Analytics.mu.Unlock()
+	log.Printf("Analytics — Total games: %d, Won: %d, Guess distribution: %v",
+		mg.Analytics.TotalGames, mg.Analytics.GamesWon, mg.Analytics.GuessCount)
 }

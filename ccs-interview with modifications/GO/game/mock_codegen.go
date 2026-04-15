@@ -46,3 +46,17 @@ func (mr *MockCodeGeneratorMockRecorder) GenerateSecretCode() *gomock.Call {
 	mr.mock.ctrl.T.Helper()
 	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateSecretCode", reflect.TypeOf((*MockCodeGenerator)(nil).GenerateSecretCode))
 }
+
+// GenerateSecretCodeWithDifficulty mocks base method.
+func (m *MockCodeGenerator) GenerateSecretCodeWithDifficulty(d Difficulty) int {
+	m.ctrl.T.Helper()
+	ret := m.ctrl.Call(m, "GenerateSecretCodeWithDifficulty", d)
+	ret0, _ := ret[0].(int)
+	return ret0
+}
+
+// GenerateSecretCodeWithDifficulty indicates an expected call of GenerateSecretCodeWithDifficulty.
+func (mr *MockCodeGeneratorMockRecorder) GenerateSecretCodeWithDifficulty(d interface{}) *gomock.Call {
+	mr.mock.ctrl.T.Helper()
+	return mr.mock.ctrl.RecordCallWithMethodType(mr.mock, "GenerateSecretCodeWithDifficulty", reflect.TypeOf((*MockCodeGenerator)(nil).GenerateSecretCodeWithDifficulty), d)
+}

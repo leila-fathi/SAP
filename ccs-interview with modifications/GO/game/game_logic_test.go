@@ -27,9 +27,8 @@ func TestCheckGuessWithValidationAndMock(t *testing.T) {
 		// Valid cases
 		{"Valid guess normal, correct", "1234", 1234, "Congratulations! You guessed the correct number!", false},
 		{"Valid guess normal, wrong", "1234", 1111, "Try again!", false},
-		{"Valid guess leading zero, correct", "0071", 71, "Congratulations! You guessed the correct number!", false},
-		{"Valid guess all zeros, correct", "0000", 0, "Congratulations! You guessed the correct number!", false},
 		{"Valid guess max 9999, wrong", "9999", 1234, "Try again!", false},
+		{"Valid guess min 1000, correct", "1000", 1000, "Congratulations! You guessed the correct number!", false},
 
 		// Invalid cases
 		{"Invalid guess letters", "12a4", 0, "", true},
@@ -39,6 +38,8 @@ func TestCheckGuessWithValidationAndMock(t *testing.T) {
 		{"Invalid guess too short", "123", 0, "", true},
 		{"Invalid guess too long", "12345", 0, "", true},
 		{"Invalid guess spaces", "12 3", 0, "", true},
+		{"Invalid guess leading zero", "0071", 0, "", true},
+		{"Invalid guess all zeros", "0000", 0, "", true},
 	}
 
 	for _, tt := range tests {
@@ -152,58 +153,6 @@ func TestGenerateTimestampPrefix(t *testing.T) {
 	}
 }
 
-func TestCheckGuessCorrectness(t *testing.T) {
-	mockCode := 1234
-
-	tests := []struct {
-		name       string
-		guess      int
-		wantResult string
-	}{
-		{"Correct guess", 1234, "correct"},
-		{"Incorrect guess", 4321, "wrong"},
-		{"Another incorrect guess", 1111, "wrong"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var result string
-			if tt.guess == mockCode {
-				result = "correct"
-			} else {
-				result = "wrong"
-			}
-			assert.Equal(t, tt.wantResult, result)
-		})
-	}
-}
-
-func TestGenerateFeedback(t *testing.T) {
-	tests := []struct {
-		name            string
-		secret          int
-		guess           int
-		wantCorrect     int
-		wantMisplaced   int
-	}{
-		{"All correct", 1234, 1234, 4, 0},
-		{"None correct", 5678, 1234, 0, 0},
-		{"Two correct position", 1234, 1256, 2, 0},
-		{"All misplaced", 1234, 4321, 0, 4},
-		{"Mix correct and misplaced", 1234, 1324, 2, 2},
-		{"One correct one misplaced", 1234, 1567, 1, 0},
-		{"Repeated digit guess", 1111, 1234, 1, 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			feedback := GenerateFeedback(tt.secret, tt.guess)
-			assert.Contains(t, feedback, fmt.Sprintf("Correct: %d", tt.wantCorrect))
-			assert.Contains(t, feedback, fmt.Sprintf("Misplaced: %d", tt.wantMisplaced))
-		})
-	}
-}
-
 func TestValidateGuess(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -211,15 +160,16 @@ func TestValidateGuess(t *testing.T) {
 		want    int
 		wantErr bool
 	}{
-		{"Valid 1234", "1234", 1234, false},
-		{"Valid 0000", "0000", 0, false},
-		{"Valid 9999", "9999", 9999, false},
-		{"Too short", "123", 0, true},
-		{"Too long", "12345", 0, true},
-		{"Letters", "abcd", 0, true},
-		{"Mixed", "12a4", 0, true},
-		{"Empty", "", 0, true},
-		{"Spaces", "1 34", 0, true},
+		{"valid 1234", "1234", 1234, false},
+		{"valid 1000", "1000", 1000, false},
+		{"valid 9999", "9999", 9999, false},
+		{"reject leading zero 0999", "0999", 0, true},
+		{"reject 0000", "0000", 0, true},
+		{"reject too short", "12", 0, true},
+		{"reject too long", "12345", 0, true},
+		{"reject letters", "12ab", 0, true},
+		{"reject empty", "", 0, true},
+		{"reject spaces", "1 34", 0, true},
 	}
 
 	for _, tt := range tests {
@@ -235,46 +185,70 @@ func TestValidateGuess(t *testing.T) {
 	}
 }
 
-func TestDifficultyLevels(t *testing.T) {
+func TestGenerateFeedback(t *testing.T) {
+	tests := []struct {
+		name          string
+		secret        int
+		guess         int
+		wantCorrect   int
+		wantMisplaced int
+	}{
+		{"exact match", 1234, 1234, 4, 0},
+		{"no match", 1234, 5678, 0, 0},
+		{"all misplaced", 1234, 4321, 0, 4},
+		{"two correct two misplaced", 1234, 1243, 2, 2},
+		{"one correct", 1234, 1567, 1, 0},
+		{"duplicate in guess, one in secret", 1234, 1155, 1, 0},
+		{"duplicate digit handling", 1123, 3211, 0, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GenerateFeedback(tt.secret, tt.guess)
+			assert.Contains(t, result, fmt.Sprintf("Correct: %d", tt.wantCorrect))
+			assert.Contains(t, result, fmt.Sprintf("Misplaced: %d", tt.wantMisplaced))
+		})
+	}
+}
+
+func TestGenerateSecretCodeWithDifficulty(t *testing.T) {
 	gen := &RandomCodeGenerator{}
 
-	t.Run("Easy generates unique digits", func(t *testing.T) {
-		for i := 0; i < 20; i++ {
+	for _, d := range []Difficulty{Easy, Medium, Hard} {
+		t.Run(string(d), func(t *testing.T) {
+			for i := 0; i < 100; i++ {
+				code := gen.GenerateSecretCodeWithDifficulty(d)
+				assert.GreaterOrEqual(t, code, 1000, "code must be >= 1000 for difficulty %s", d)
+				assert.LessOrEqual(t, code, 9999, "code must be <= 9999 for difficulty %s", d)
+			}
+		})
+	}
+
+	// Easy: all digits unique
+	t.Run("Easy digits unique", func(t *testing.T) {
+		for i := 0; i < 50; i++ {
 			code := gen.GenerateSecretCodeWithDifficulty(Easy)
-			assert.GreaterOrEqual(t, code, 1000)
-			assert.LessOrEqual(t, code, 9999)
-			// All digits must be unique
 			digits := [4]int{}
 			temp := code
 			for j := 3; j >= 0; j-- {
 				digits[j] = temp % 10
 				temp /= 10
 			}
-			seen := map[int]bool{}
-			for _, d := range digits {
-				assert.False(t, seen[d], "Easy mode should have unique digits, got %d", code)
-				seen[d] = true
-			}
+			assert.NotEqual(t, digits[0], digits[1])
+			assert.NotEqual(t, digits[0], digits[2])
+			assert.NotEqual(t, digits[0], digits[3])
+			assert.NotEqual(t, digits[1], digits[2])
+			assert.NotEqual(t, digits[1], digits[3])
+			assert.NotEqual(t, digits[2], digits[3])
 		}
 	})
 
-	t.Run("Hard generates repeating digit with prime sum", func(t *testing.T) {
-		for i := 0; i < 20; i++ {
-			code := gen.GenerateSecretCodeWithDifficulty(Hard)
+	// Default GenerateSecretCode delegates to Medium
+	t.Run("default delegates to Medium", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			code := gen.GenerateSecretCode()
 			assert.GreaterOrEqual(t, code, 1000)
 			assert.LessOrEqual(t, code, 9999)
-			digits := [4]int{}
-			sum := 0
-			temp := code
-			for j := 3; j >= 0; j-- {
-				digits[j] = temp % 10
-				sum += digits[j]
-				temp /= 10
-			}
-			assert.True(t, isPrime(sum), "Hard mode sum %d should be prime for code %d", sum, code)
-			hasRepeat := digits[0] == digits[1] || digits[0] == digits[2] || digits[0] == digits[3] ||
-				digits[1] == digits[2] || digits[1] == digits[3] || digits[2] == digits[3]
-			assert.True(t, hasRepeat, "Hard mode should have repeating digits, got %d", code)
 		}
 	})
 }

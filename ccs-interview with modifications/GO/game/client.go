@@ -6,7 +6,6 @@ import (
 	"net"
 	"os"
 	"strings"
-	"time"
 )
 
 func StartClient(address string) error {
@@ -14,12 +13,13 @@ func StartClient(address string) error {
 	if err != nil {
 		return fmt.Errorf("error connecting to server: %v", err)
 	}
-	defer conn.Close()
 
 	fmt.Println("Connected to server. Waiting for game to start...")
+	fmt.Println("Type 'exit' or 'quit' at any time to leave the game.")
 
-	// Start a goroutine to continuously read server messages
 	done := make(chan struct{})
+
+	// Goroutine: continuously read and print server messages
 	go func() {
 		buf := make([]byte, 4096)
 		for {
@@ -30,40 +30,48 @@ func StartClient(address string) error {
 				return
 			}
 			msg := string(buf[:n])
-			fmt.Print(msg)
+			fmt.Print("\n" + msg)
 
-			if strings.Contains(msg, "Congratulations! You guessed the correct number!") {
-				fmt.Println("You won!")
+			if strings.Contains(msg, "Shutting down") || strings.Contains(msg, "Goodbye") {
+				close(done)
+				return
 			}
 		}
 	}()
 
-	// Read user input and send to server
+	// Goroutine: read stdin
 	reader := bufio.NewReader(os.Stdin)
+	inputCh := make(chan string)
+	go func() {
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimSpace(line)
+			if line != "" {
+				inputCh <- line
+			}
+		}
+	}()
+
 	for {
 		select {
 		case <-done:
+			conn.Close()
 			return nil
-		default:
+		case line := <-inputCh:
+			if strings.EqualFold(line, "exit") || strings.EqualFold(line, "quit") {
+				_, _ = conn.Write([]byte("QUIT"))
+				fmt.Println("Exiting the game.")
+				conn.Close()
+				return nil
+			}
+			_, err := conn.Write([]byte(line))
+			if err != nil {
+				conn.Close()
+				return fmt.Errorf("error sending to server: %v", err)
+			}
 		}
-
-		guess, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("error reading input: %v", err)
-		}
-		guess = strings.TrimSpace(guess)
-
-		if strings.EqualFold(guess, "exit") {
-			fmt.Println("Exiting the game.")
-			return nil
-		}
-
-		_, err = conn.Write([]byte(guess))
-		if err != nil {
-			return fmt.Errorf("error sending message to server: %v", err)
-		}
-
-		// Small delay to let the server response arrive before next prompt
-		time.Sleep(100 * time.Millisecond)
 	}
 }

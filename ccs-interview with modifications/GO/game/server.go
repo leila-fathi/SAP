@@ -32,36 +32,58 @@ func (g *Game) StartServer() {
 
 	fmt.Println("Player has connected.")
 
-	// Generate the secret code ONCE per session
-	secret := g.CodeGen.GenerateSecretCode()
-	log.Printf("Secret code generated: %d", secret)
-
 	for {
-		buffer := make([]byte, 1024)
+		// Generate a new secret for each round
+		secret := g.CodeGen.GenerateSecretCode()
+		writeToClient(conn, GenerateTimestampPrefix()+"New round! Guess the 4-digit secret code (or QUIT to leave).\n")
+
+		won := false
+		for !won {
+			buffer := make([]byte, 1024)
+			n, err := conn.Read(buffer)
+			if err != nil {
+				log.Printf("Error reading from client: %v", err)
+				return
+			}
+
+			guess := strings.TrimSpace(string(buffer[:n]))
+			fmt.Printf("Received guess: %s\n", guess)
+
+			if strings.EqualFold(guess, "QUIT") {
+				writeToClient(conn, GenerateTimestampPrefix()+"Goodbye!\n")
+				return
+			}
+
+			numGuess, err := ValidateGuess(guess)
+			if err != nil {
+				writeToClient(conn, GenerateTimestampPrefix()+err.Error()+"\n")
+				continue
+			}
+
+			prefix := GenerateTimestampPrefix()
+			if secret == numGuess {
+				writeToClient(conn, prefix+"Congratulations! You guessed the correct number!\n")
+				writeToClient(conn, prefix+"Type RESTART to play again or QUIT to disconnect.\n")
+				won = true
+			} else {
+				feedback := GenerateFeedback(secret, numGuess)
+				writeToClient(conn, prefix+"Try again! "+feedback+"\n")
+			}
+		}
+
+		// Wait for restart or quit
+		buffer := make([]byte, 256)
 		n, err := conn.Read(buffer)
 		if err != nil {
-			log.Printf("Error reading from client: %v", err)
+			log.Printf("Client disconnected: %v", err)
 			return
 		}
-
-		guess := strings.TrimSpace(string(buffer[:n]))
-		fmt.Printf("Received guess: %s\n", guess)
-
-		numGuess, err := ValidateGuess(guess)
-		prefix := GenerateTimestampPrefix()
-
-		if err != nil {
-			log.Printf("Error validating guess: %v", err)
-			writeToClient(conn, prefix+err.Error()+"\n")
-		} else if numGuess == secret {
-			writeToClient(conn, prefix+"Congratulations! You guessed the correct number!\n")
-			// Start a new round with a new secret
-			secret = g.CodeGen.GenerateSecretCode()
-			log.Printf("New secret code generated: %d", secret)
-		} else {
-			feedback := GenerateFeedback(secret, numGuess)
-			writeToClient(conn, prefix+feedback+"\n")
+		cmd := strings.TrimSpace(string(buffer[:n]))
+		if strings.EqualFold(cmd, "RESTART") {
+			continue // new round with new secret
 		}
+		writeToClient(conn, GenerateTimestampPrefix()+"Shutting down. Goodbye!\n")
+		return
 	}
 }
 

@@ -7,27 +7,3 @@ services:
     ports:
       - "8080:8080"
     command: ["./game-app", "-mode=mserver", "-players=2", "-timeout=15", "-addr=0.0.0.0:8080"]
-
-  client1:
-    image: golang:1.21-alpine
-    container_name: code_breaker_client1
-    working_dir: /app
-    volumes:
-      - .:/app
-    stdin_open: true   # keep stdin open
-    tty: true          # allocate TTY for interactive input
-    depends_on:
-      - server
-    command: ["go", "run", "main.go", "-mode=client", "-addr=server:8080"]
-
-  client2:
-    image: golang:1.21-alpine
-    container_name: code_breaker_client2
-    working_dir: /app
-    volumes:
-      - .:/app
-    stdin_open: true
-    tty: true
-    depends_on:
-      - server
-    command: ["go", "run", "main.go", "-mode=client", "-addr=server:8080"]

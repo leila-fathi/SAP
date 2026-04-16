@@ -3,6 +3,7 @@ package game
 import (
 	"fmt"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -26,9 +27,8 @@ func TestCheckGuessWithValidationAndMock(t *testing.T) {
 		// Valid cases
 		{"Valid guess normal, correct", "1234", 1234, "Congratulations! You guessed the correct number!", false},
 		{"Valid guess normal, wrong", "1234", 1111, "Try again!", false},
-		{"Valid guess leading zero, correct", "0071", 71, "Congratulations! You guessed the correct number!", false},
-		{"Valid guess all zeros, correct", "0000", 0, "Congratulations! You guessed the correct number!", false},
 		{"Valid guess max 9999, wrong", "9999", 1234, "Try again!", false},
+		{"Valid guess min 1000, correct", "1000", 1000, "Congratulations! You guessed the correct number!", false},
 
 		// Invalid cases
 		{"Invalid guess letters", "12a4", 0, "", true},
@@ -38,6 +38,8 @@ func TestCheckGuessWithValidationAndMock(t *testing.T) {
 		{"Invalid guess too short", "123", 0, "", true},
 		{"Invalid guess too long", "12345", 0, "", true},
 		{"Invalid guess spaces", "12 3", 0, "", true},
+		{"Invalid guess leading zero", "0071", 0, "", true},
+		{"Invalid guess all zeros", "0000", 0, "", true},
 	}
 
 	for _, tt := range tests {
@@ -67,12 +69,12 @@ func TestCheckGuessWithValidationAndMock(t *testing.T) {
 		})
 	}
 }
+
 func validatePrefixStructure(prefix string) (int64, error) {
 	if !strings.HasPrefix(prefix, "TIME: ") {
 		return 0, fmt.Errorf("missing TIME: prefix")
 	}
 
-	// Expect format: TIME: <unix>
 	var ts int64
 	_, err := fmt.Sscanf(prefix, "TIME: %d", &ts)
 	if err != nil {
@@ -82,10 +84,9 @@ func validatePrefixStructure(prefix string) (int64, error) {
 }
 
 func TestGenerateTimestampPrefix(t *testing.T) {
-
 	tests := []struct {
 		name      string
-		mockValue string // injected malformed values for negative scenarios
+		mockValue string
 		useMock   bool
 		wantError bool
 	}{
@@ -128,23 +129,16 @@ func TestGenerateTimestampPrefix(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-
 			var prefix string
-
 			if tt.useMock {
-				// artificial error case
 				prefix = tt.mockValue
 			} else {
-				// real call
 				prefix = GenerateTimestampPrefix()
-
-				// baseline validations for real function
 				assert.NotEmpty(t, prefix, "Prefix must not be empty")
 				assert.True(t, strings.HasPrefix(prefix, "TIME: "), "Prefix must start with 'TIME: '")
 			}
 
 			ts, err := validatePrefixStructure(prefix)
-
 			if tt.wantError {
 				assert.Error(t, err, "Expected to detect malformed prefix")
 				return
@@ -153,41 +147,145 @@ func TestGenerateTimestampPrefix(t *testing.T) {
 			assert.NoError(t, err, "Prefix structure must be valid")
 			assert.Greater(t, ts, int64(0), "Timestamp must be positive")
 
-			// Check timestamp is within 2 seconds of now
 			now := time.Now().Unix()
 			assert.InDelta(t, now, ts, 2, "Timestamp should be close to current time")
 		})
 	}
 }
 
-func TestCheckGuessCorrectness(t *testing.T) {
-	// Mocked secret code for deterministic testing
-	mockCode := 1234
-
-	// Define test cases in a table
+func TestValidateGuess(t *testing.T) {
 	tests := []struct {
-		name       string
-		guess      int
-		wantResult string
+		name    string
+		input   string
+		want    int
+		wantErr bool
 	}{
-		{"Correct guess", 1234, "correct"},
-		{"Incorrect guess", 4321, "wrong"},
-		{"Another incorrect guess", 1111, "wrong"},
+		{"valid 1234", "1234", 1234, false},
+		{"valid 1000", "1000", 1000, false},
+		{"valid 9999", "9999", 9999, false},
+		{"reject leading zero 0999", "0999", 0, true},
+		{"reject 0000", "0000", 0, true},
+		{"reject too short", "12", 0, true},
+		{"reject too long", "12345", 0, true},
+		{"reject letters", "12ab", 0, true},
+		{"reject empty", "", 0, true},
+		{"reject spaces", "1 34", 0, true},
 	}
 
-	// Iterate over the table
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var result string
-			if tt.guess == mockCode {
-				result = "correct"
+			got, err := ValidateGuess(tt.input)
+			if tt.wantErr {
+				assert.Error(t, err)
 			} else {
-				result = "wrong"
-			}
-
-			if result != tt.wantResult {
-				t.Errorf("For guess %d, expected %s but got %s", tt.guess, tt.wantResult, result)
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
 			}
 		})
 	}
+}
+
+func TestGenerateFeedback(t *testing.T) {
+	tests := []struct {
+		name          string
+		secret        int
+		guess         int
+		wantCorrect   int
+		wantMisplaced int
+	}{
+		{"exact match", 1234, 1234, 4, 0},
+		{"no match", 1234, 5678, 0, 0},
+		{"all misplaced", 1234, 4321, 0, 4},
+		{"two correct two misplaced", 1234, 1243, 2, 2},
+		{"one correct", 1234, 1567, 1, 0},
+		{"duplicate in guess, one in secret", 1234, 1155, 1, 0},
+		{"duplicate digit handling", 1123, 3211, 0, 4},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := GenerateFeedback(tt.secret, tt.guess)
+			assert.Contains(t, result, fmt.Sprintf("Correct: %d", tt.wantCorrect))
+			assert.Contains(t, result, fmt.Sprintf("Misplaced: %d", tt.wantMisplaced))
+		})
+	}
+}
+
+func TestGenerateSecretCodeWithDifficulty(t *testing.T) {
+	gen := &RandomCodeGenerator{}
+
+	for _, d := range []Difficulty{Easy, Medium, Hard} {
+		t.Run(string(d), func(t *testing.T) {
+			for i := 0; i < 100; i++ {
+				code := gen.GenerateSecretCodeWithDifficulty(d)
+				assert.GreaterOrEqual(t, code, 1000, "code must be >= 1000 for difficulty %s", d)
+				assert.LessOrEqual(t, code, 9999, "code must be <= 9999 for difficulty %s", d)
+			}
+		})
+	}
+
+	// Easy: all digits unique
+	t.Run("Easy digits unique", func(t *testing.T) {
+		for i := 0; i < 50; i++ {
+			code := gen.GenerateSecretCodeWithDifficulty(Easy)
+			digits := [4]int{}
+			temp := code
+			for j := 3; j >= 0; j-- {
+				digits[j] = temp % 10
+				temp /= 10
+			}
+			assert.NotEqual(t, digits[0], digits[1])
+			assert.NotEqual(t, digits[0], digits[2])
+			assert.NotEqual(t, digits[0], digits[3])
+			assert.NotEqual(t, digits[1], digits[2])
+			assert.NotEqual(t, digits[1], digits[3])
+			assert.NotEqual(t, digits[2], digits[3])
+		}
+	})
+
+	// Default GenerateSecretCode delegates to Medium
+	t.Run("default delegates to Medium", func(t *testing.T) {
+		for i := 0; i < 100; i++ {
+			code := gen.GenerateSecretCode()
+			assert.GreaterOrEqual(t, code, 1000)
+			assert.LessOrEqual(t, code, 9999)
+		}
+	})
+}
+
+func TestAnalyticsConcurrency(t *testing.T) {
+	a := NewAnalytics()
+	var wg sync.WaitGroup
+
+	// Simulate 100 concurrent guess recordings
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func(n int) {
+			defer wg.Done()
+			a.RecordGuess(n % 10)
+		}(i)
+	}
+
+	// Simulate 50 concurrent game recordings
+	for i := 0; i < 50; i++ {
+		wg.Add(1)
+		go func(win bool) {
+			defer wg.Done()
+			a.RecordGame(win)
+		}(i%2 == 0)
+	}
+
+	wg.Wait()
+
+	assert.Equal(t, 100, a.GuessTotal)
+	assert.Equal(t, 50, a.TotalGames)
+	assert.Equal(t, 25, a.GamesWon)
+	assert.Equal(t, 25, a.GamesLost)
+
+	// Verify guess frequency sums to 100
+	total := 0
+	for _, count := range a.GuessCount {
+		total += count
+	}
+	assert.Equal(t, 100, total)
 }

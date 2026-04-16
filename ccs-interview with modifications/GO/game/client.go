@@ -5,63 +5,73 @@ import (
 	"fmt"
 	"net"
 	"os"
-	"time"
+	"strings"
 )
 
 func StartClient(address string) error {
-	// Connect to the server
 	conn, err := net.Dial("tcp", address)
 	if err != nil {
 		return fmt.Errorf("error connecting to server: %v", err)
 	}
-	defer conn.Close()
 
-	fmt.Println("Welcome to the Code Breaker Game! Enter a code between 1000 and 9999.")
+	fmt.Println("Connected to server. Waiting for game to start...")
+	fmt.Println("Type 'exit' or 'quit' at any time to leave the game.")
 
-	// Create a reader to capture input from stdin
+	done := make(chan struct{})
+
+	// Goroutine: continuously read and print server messages
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, err := conn.Read(buf)
+			if err != nil {
+				fmt.Println("\nDisconnected from server.")
+				close(done)
+				return
+			}
+			msg := string(buf[:n])
+			fmt.Print("\n" + msg)
+
+			if strings.Contains(msg, "Shutting down") || strings.Contains(msg, "Goodbye") {
+				close(done)
+				return
+			}
+		}
+	}()
+
+	// Goroutine: read stdin
 	reader := bufio.NewReader(os.Stdin)
+	inputCh := make(chan string)
+	go func() {
+		for {
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return
+			}
+			line = strings.TrimSpace(line)
+			if line != "" {
+				inputCh <- line
+			}
+		}
+	}()
 
-	// Start the game loop
 	for {
-		// Prompt the user to enter their guess
-		fmt.Print("Enter your guess (secret code) or 'exit' to quit: ")
-		guess, err := reader.ReadString('\n')
-		if err != nil {
-			return fmt.Errorf("error reading input: %v", err)
+		select {
+		case <-done:
+			conn.Close()
+			return nil
+		case line := <-inputCh:
+			if strings.EqualFold(line, "exit") || strings.EqualFold(line, "quit") {
+				_, _ = conn.Write([]byte("QUIT"))
+				fmt.Println("Exiting the game.")
+				conn.Close()
+				return nil
+			}
+			_, err := conn.Write([]byte(line))
+			if err != nil {
+				conn.Close()
+				return fmt.Errorf("error sending to server: %v", err)
+			}
 		}
-		guess = guess[:len(guess)-1] // Remove the trailing newline character
-
-		// Allow the user to quit the game
-		if guess == "exit" {
-			fmt.Println("Exiting the game.")
-			break
-		}
-
-		// Send the guess to the server
-		_, err = conn.Write([]byte(guess))
-		if err != nil {
-			return fmt.Errorf("error sending message to server: %v", err)
-		}
-
-		// Wait for a response from the server
-		buffer := make([]byte, 1024)
-		n, err := conn.Read(buffer)
-		if err != nil {
-			return fmt.Errorf("error reading from server: %v", err)
-		}
-
-		// Print the server's response
-		serverResponse := string(buffer[:n])
-		fmt.Println("Server response:", serverResponse)
-
-		// If the guess was correct, end the game
-		if serverResponse == "Congratulations! You guessed the correct number!" {
-			fmt.Println("You won the game! Exiting...")
-			break
-		}
-
-		time.Sleep(1 * time.Second) // Simulate a delay before the next round
 	}
-
-	return nil
 }

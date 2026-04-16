@@ -277,7 +277,7 @@ func TestMultiplayer(t *testing.T) {
 				sendMsg(t, p2, "QUIT")
 			},
 			waitAfter: 2 * time.Second,
-			wantP1:    []string{"has left the game", "Not enough players"},
+			wantP1:    []string{"has left the game", "Not enough players to continue the round"},
 			wantP2:    []string{"Goodbye"},
 		},
 		{
@@ -288,7 +288,7 @@ func TestMultiplayer(t *testing.T) {
 				p2.Close()
 			},
 			waitAfter: 2 * time.Second,
-			wantP1:    []string{"has disconnected", "Not enough players"},
+			wantP1:    []string{"has disconnected", "Not enough players to continue the round"},
 			wantP2:    []string{},
 			p2Closed:  true,
 		},
@@ -311,7 +311,7 @@ func TestMultiplayer(t *testing.T) {
 				sendMsg(t, p2, "EXIT")
 			},
 			waitAfter: 2 * time.Second,
-			wantP1:    []string{"has left the game", "Not enough players"},
+			wantP1:    []string{"has left the game", "Not enough players to continue the round"},
 			wantP2:    []string{"Goodbye"},
 		},
 		{
@@ -544,12 +544,12 @@ func TestSinglePlayerServer_RestartFlow(t *testing.T) {
 
 	// Win the first round
 	sendMsg(t, conn, "1234")
+	// Both "Congratulations" and "Type RESTART" messages may arrive in a single
+	// TCP read due to coalescing, so concatenate both reads before asserting.
 	resp := readMsg(t, conn, 2*time.Second)
+	resp += readMsg(t, conn, 2*time.Second)
 	assert.Contains(t, resp, "Congratulations")
-
-	// Ask for restart
-	resp2 := readMsg(t, conn, 2*time.Second)
-	assert.Contains(t, resp2, "RESTART")
+	assert.Contains(t, resp, "RESTART")
 }
 
 func TestAnalytics_ConcurrentSafety(t *testing.T) {

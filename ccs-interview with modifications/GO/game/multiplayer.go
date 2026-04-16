@@ -133,12 +133,14 @@ func (mg *MultiplayerGame) Start(address string) error {
 	for len(mg.getActivePlayers()) < mg.MaxPlayers {
 		select {
 		case conn := <-newConns:
+			mg.mu.Lock()
 			player := &Player{
 				ID:   len(mg.players) + 1,
 				Conn: conn,
 				In:   make(chan PlayerMessage, 10),
 			}
 			mg.players = append(mg.players, player)
+			mg.mu.Unlock()
 			startPlayerReader(player)
 			log.Printf("Player %d connected from %s", player.ID, conn.RemoteAddr().String())
 			mg.writeToPlayer(player, fmt.Sprintf("%sWelcome Player %d! Waiting for other players...\nType QUIT at any time to leave the game.\n", GenerateTimestampPrefix(), player.ID))
@@ -149,10 +151,8 @@ func (mg *MultiplayerGame) Start(address string) error {
 				select {
 				case msg := <-p.In:
 					if msg.Err != nil || strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
-						log.Printf("Player %d left during lobby.", p.ID)
 						mg.writeToPlayer(p, GenerateTimestampPrefix()+"Goodbye!\n")
-						p.Conn.Close()
-						p.Conn = nil
+						mg.disconnectPlayer(p, "left during lobby")
 						// Notify remaining players in the lobby
 						for _, other := range mg.getActivePlayers() {
 							mg.writeToPlayer(other, fmt.Sprintf("%sPlayer %d has left. Waiting for more players...\n", GenerateTimestampPrefix(), p.ID))
@@ -225,7 +225,7 @@ func (mg *MultiplayerGame) Start(address string) error {
 			} else if strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
 				restartVotes[msg.Player.ID] = false
 				mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"Goodbye!\n")
-				msg.Player.Conn.Close()
+				mg.disconnectPlayer(msg.Player, "quit after round")
 			} else {
 				restartVotes[msg.Player.ID] = false
 			}
@@ -283,13 +283,12 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 		}
 
 		if msg.Err != nil {
-			log.Printf("Player %d disconnected: %v", msg.Player.ID, msg.Err)
-			_ = msg.Player.Conn.Close()
+			mg.disconnectPlayer(msg.Player, fmt.Sprintf("read error: %v", msg.Err))
 			activePlayers = removePlayers(activePlayers, msg.Player)
 			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d has disconnected.\n", GenerateTimestampPrefix(), msg.Player.ID))
 			if len(activePlayers) < 2 {
-				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue. Game over.\n", GenerateTimestampPrefix()))
-				log.Printf("Not enough players remaining. Ending game session.")
+				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue the round.\n", GenerateTimestampPrefix()))
+				log.Printf("Not enough players remaining. Ending round.")
 				return nil
 			}
 			current = current % len(activePlayers)
@@ -298,14 +297,13 @@ func (mg *MultiplayerGame) runGameSession(secret int) *Player {
 
 		// Handle QUIT/EXIT from any player at any time
 		if strings.EqualFold(msg.Text, "QUIT") || strings.EqualFold(msg.Text, "EXIT") {
-			log.Printf("Player %d quit the game.", msg.Player.ID)
 			mg.writeToPlayer(msg.Player, GenerateTimestampPrefix()+"Goodbye!\n")
-			_ = msg.Player.Conn.Close()
+			mg.disconnectPlayer(msg.Player, "quit")
 			activePlayers = removePlayers(activePlayers, msg.Player)
 			mg.broadcastAll(activePlayers, fmt.Sprintf("%sPlayer %d has left the game.\n", GenerateTimestampPrefix(), msg.Player.ID))
 			if len(activePlayers) < 2 {
-				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue. Game over.\n", GenerateTimestampPrefix()))
-				log.Printf("Not enough players remaining. Ending game session.")
+				mg.broadcastAll(activePlayers, fmt.Sprintf("%sNot enough players to continue the round.\n", GenerateTimestampPrefix()))
+				log.Printf("Not enough players remaining. Ending round.")
 				return nil
 			}
 			current = current % len(activePlayers)
@@ -400,6 +398,8 @@ func (mg *MultiplayerGame) readFromAny(players []*Player, timeout time.Duration)
 
 // getActivePlayers returns players whose connections are still open.
 func (mg *MultiplayerGame) getActivePlayers() []*Player {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 	result := []*Player{}
 	for _, p := range mg.players {
 		if p != nil && p.Conn != nil {
@@ -422,6 +422,8 @@ func removePlayers(players []*Player, remove *Player) []*Player {
 
 // disconnectPlayer closes a player's connection and marks them inactive.
 func (mg *MultiplayerGame) disconnectPlayer(p *Player, reason string) {
+	mg.mu.Lock()
+	defer mg.mu.Unlock()
 	if p.Conn != nil {
 		_ = p.Conn.Close()
 		p.Conn = nil
